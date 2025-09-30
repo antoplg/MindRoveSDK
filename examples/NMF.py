@@ -9,6 +9,8 @@ perform NMF with 2 components (flexion vs extension), and plot:
   2) Curve di attivazione temporale delle due sinergie
 """
 
+# Preference-informed Fuzzy Control of an Origami Supernumerary Robotic Limb via sEMG Feedback
+
 import os
 import glob
 import sys
@@ -17,7 +19,8 @@ import matplotlib.pyplot as plt
 import argparse
 from sklearn.decomposition import NMF
 
-trim_percent = 5
+trim_percent        = 5
+trim_percent_coco   = 5
 
 def load_data(path):
     ext = os.path.splitext(path)[1].lower()
@@ -72,7 +75,6 @@ def compute_synergy_metrics(H, trim_percent):
       trim_percent -- percentage of highest H-values to ignore when computing maxima
 
     Returns:
-      H_online    -- online estimate of H via pseudoinverse: shape (n_comp, ns)
       k_ext_max   -- max of H[0, :] after trimming top trim_percent%
       k_flex_max  -- max of H[1, :] after trimming top trim_percent%
       k_ext_min   -- 1.3 × min of H[0, :]

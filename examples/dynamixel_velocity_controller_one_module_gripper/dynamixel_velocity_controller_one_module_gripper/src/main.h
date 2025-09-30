@@ -18,12 +18,11 @@ String DataBLE = "";
 // Timing control
 Timer Timer_01, Timer_02;
 
-int postionContolLoop = 20, printLoop = 100; // [ms]
-bool print = true;
+int postionContolLoop = 20, printLoop = 200; // [ms]
+bool print = false;
 
 //Initialize module class
-//int max_motor_speed = 150, min_motor_speed = -150; // [0.024 rad/s] or [0.229 rotation/minute] // [raw]
-int max_motor_speed = 40, min_motor_speed = -40; // [0.024 rad/s] or [0.229 rotation/minute] // [raw]
+int max_motor_speed = 200, min_motor_speed = -200; // [0.024 rad/s] or [0.229 rotation/minute] // [raw]
 
 float min_position = 15*PI/180; // appx 0.26, before it was 5
 float max_position = 60*PI/180; // appx 1.4 [rad], before it was 80
@@ -32,7 +31,7 @@ float max_position = 60*PI/180; // appx 1.4 [rad], before it was 80
 float setpointAngle=min_position, setpointVelocity = 0; // for sinusoidal angle
 
 // --- CONTROL MODE ---
-int controlMode = 3; // 0-> JOYSTICK; 1-> HBC DIAPHRAGM; 2-> HBC DIAPHRAGM & SOCKS; 3-> POSITION CONTROL; 4 -> EMG
+int controlMode = 4; // 0-> JOYSTICK; 1-> HBC DIAPHRAGM; 2-> HBC DIAPHRAGM & SOCKS; 3-> POSITION CONTROL; 4 -> EMG
 
 // --- JOYSTICK CONTROL ---
 // Set default joystick angles to minimum extension
@@ -75,7 +74,6 @@ const uint8_t GRIPPER_DXL_ID = 6;
 float poseUnit = 0.001534355; // [rad/RAW_DATA]
 
 Module module1(DXL_ID[0], DXL_ID[1], DXL_ID[2]);
-//Module module2(DXL_ID[3], DXL_ID[4], DXL_ID[5]);
 
 float startTime, currentTime, previousTime;
 
@@ -119,17 +117,9 @@ sr_data_t sr_data[DXL_ID_CNT_TOTAL];
 DYNAMIXEL::InfoSyncReadInst_t sr_infos;
 DYNAMIXEL::XELInfoSyncRead_t info_xels_sr[DXL_ID_CNT_TOTAL];
 
-//sr_data_t sr_data[DXL_ID_CNT];
-//DYNAMIXEL::InfoSyncReadInst_t sr_infos;
-//DYNAMIXEL::XELInfoSyncRead_t info_xels_sr[DXL_ID_CNT];
-
 sw_data_t sw_data[DXL_ID_CNT_TOTAL];
 DYNAMIXEL::InfoSyncWriteInst_t sw_infos;
 DYNAMIXEL::XELInfoSyncWrite_t info_xels_sw[DXL_ID_CNT_TOTAL];
-
-//sw_data_t sw_data[DXL_ID_CNT];
-//DYNAMIXEL::InfoSyncWriteInst_t sw_infos;
-//DYNAMIXEL::XELInfoSyncWrite_t info_xels_sw[DXL_ID_CNT];
 
 // --------------
 
@@ -153,4 +143,11 @@ String getValue(String data, char separator, int index)
 
 float sinWaveGenerator(double offset, double amplitude, double period, double currentTime){
   return amplitude*sin(2*PI*currentTime/period) + offset;
+}
+
+// Function to Convert a Byte Array to a Float (4 Bytes)
+float bytesToFloat(uint8_t *buffer, int startIndex) {
+  float value;
+  memcpy(&value, &buffer[startIndex], 4); // Copy 4 bytes into the double
+  return value;
 }
