@@ -3,13 +3,13 @@ import os
 import glob
 import argparse
 import numpy as np
+import signal
 import pyqtgraph as pg
 from pathlib import Path
 from scipy.signal import butter, iirnotch, filtfilt
 from pyqtgraph.Qt import QtCore, QtWidgets
 from mindrove.board_shim import BoardShim, MindRoveInputParams, BoardIds
 from NMF import compute_synergy_metrics, Perform_NMF, trim_percent
-import datetime
 import csv
 
 INVERSION   = True
@@ -38,6 +38,7 @@ b_hp, a_hp       = butter(4, 20.0/(sr/2), btype='highpass')
 # Buffer circolare per cocontrazione
 buf_len    = int(1 * sr)  # 1 secondo di buffer
 cocon_buf  = np.zeros(buf_len)
+session_cocon = []
 
 # ───── 4) Build pyqtgraph window ──────────────────────────────
 pg.setConfigOption('background', 'w')
@@ -116,6 +117,9 @@ def update():
 
     data_raw = board.get_board_data(N)
 
+    if data_raw.shape[1] < 20:
+        return
+    
     # --- Filtra EMG ---
     data_filt = np.zeros_like(data_raw)
     for ch in emg_ch:
@@ -150,6 +154,9 @@ def update():
     cocon_smooth = (1 - alpha) * cocon_smooth + alpha * cocon_raw
     cocon = cocon_smooth
 
+    # --- Accumula ---
+    session_cocon.append([cocon])
+
     # --- Aggiorna buffer ---
     global cocon_buf
     cocon_buf[:-1] = cocon_buf[1:]
@@ -159,17 +166,28 @@ def update():
     curve.setData(cocon_buf)
     p.enableAutoRange(axis='y', enable=True)
 
-    # --- Salva solo cocontrazione ---
-    with open(log_file, "a", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow([cocon])
-        
-print("\nCalibration completed. Results saved to 'cocontraction_results.csv'.")
-
 # timer
 timer = QtCore.QTimer()
 timer.timeout.connect(update)
-timer.start(40)
+timer.start(50)
+
+def save_and_quit(*args):
+    # EMG
+    if session_cocon:
+        all_emg = np.vstack(session_cocon)
+        np.save("cocontraction_session.npy", all_emg)
+        hdr = ",".join(f"emg_{ch}" for ch in emg_ch)
+        np.savetxt("cocontraction_session.csv", all_emg,
+                   delimiter=",", header=hdr, comments="")
+        print(f"Saved EMG {all_emg.shape[0]}×{all_emg.shape[1]}")
+    else:
+        print("No EMG data captured.")
+
+    QtWidgets.QApplication.quit()
+
+
+signal.signal(signal.SIGINT, save_and_quit)
+app.aboutToQuit.connect(save_and_quit)
 
 # ───── 8) Start GUI loop ──────────────────────────────────────
 if __name__ == '__main__':

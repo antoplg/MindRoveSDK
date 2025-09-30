@@ -15,19 +15,6 @@ from mindrove.board_shim import BoardShim, MindRoveInputParams, BoardIds
 from NMF import compute_synergy_metrics, Perform_NMF, trim_percent
 from serial.tools import list_ports
 
-
-# ======= Parametri generali =======
-BAUD_RATE       = 115200
-SERIAL_TIMEOUT  = 0.01     # s, lettura non bloccante
-TX_HEADER       = b'V'     # header per inviare velocità (float32)
-PRINT_EVERY     = 0.2      # s, quanto spesso stampare feedback a video
-
-NUM_ITERATIONS  = 10
-RANGE_A         = (0.0, 1.0)
-MIN_DISTANCE    = 0.15     # distanza minima tra campioni di 'a'
-N_SAMPLES       = 1000     # candidati per la policy di acquisizione
-
-
 INVERSION   = True
 SERIAL_COM  = True
 baud_rate   = 115200
@@ -101,7 +88,7 @@ def load_calibration_cocon(csv_path="cocontraction_session.csv", percent=10):
 
 COCON_MIN, COCON_MAX = load_calibration_cocon("cocontraction_session.csv", percent=trim_percent)
 
-# ───── mapping velocity ─────────────────────────────────────
+# ───── mapping velocity ────────────────────────────────
 
 def velocity_from_cocon(cocon: float, a: float) -> float:
     """
@@ -118,7 +105,7 @@ def velocity_from_cocon(cocon: float, a: float) -> float:
     return (np.exp(k*x) - 1.0) / k
 
 # ───── Compute NMF offline ─────────────────────────────────
-    
+
 def load_data(path):
     ext = os.path.splitext(path)[1].lower()
     if ext == '.npy':
@@ -182,7 +169,7 @@ rms_kernel    = np.ones(rms_win_samps) / rms_win_samps
 
 cocon_smooth = 0.0
 
-def update(a_value):
+def update():
     global cocon_buf, cocon_smooth
 
     count = board.get_board_data_count()
@@ -190,6 +177,9 @@ def update(a_value):
         return
 
     data_raw = board.get_board_data(N)
+
+    if data_raw.shape[1] < 20:
+        return
 
     # Filtra EMG
     data_filt = np.zeros_like(data_raw)
@@ -251,110 +241,3 @@ timer.start(60)
 # ───── Start GUI loop ──────────────────────────────────────
 if __name__ == '__main__':
     sys.exit(app.exec_())
-
-
-# ======= Streaming per valutare un candidato 'a' =======
-def stream_candidate(a_value: float, max_time_s: float = 30.0, tx_rate_hz: float = 50.0):
-    """
-    Streamma in tempo reale la velocità calcolata da cocon e parametro 'a':
-    - legge cocon dal seriale (non bloccante)
-    - calcola vel = f(cocon, a)
-    - invia vel come float32 con header 'V'
-    - termina quando utente preme Invio o scade max_time_s
-    """
-    print(f"\n=== Test parameter a = {a_value:.3f} ===")
-    print("cocontract to feel the real-time response.")
-    waiter = EnterWaiter()
-    waiter.start()
-    t0 = time.time()
-
-    while not waiter.is_set():
-        if (time.time() - t0) > max_time_s:
-            print("Timeout")
-            break
-
-        update(a_value)   # calcola cocon + manda vel
-        time.sleep(0.05)  # 20 Hz   
-
-# ======= Scelta utente tra due candidati =======
-def get_user_choice():
-    while True:
-        c = input("Choose: [1] first, [2] second, [r] repeat, [q] quit: ").strip().lower()
-        if c in ('1', '2', 'r', 'q'):
-            return c
-        print("Input is not valid.")
-
-# ======= Selezione del prossimo candidato con GP (UCB penalizzato) =======
-def select_next_candidate(gp, X_train, previous_best, min_distance=MIN_DISTANCE):
-    samples = np.linspace(RANGE_A[0], RANGE_A[1], N_SAMPLES).reshape(-1, 1)
-    tested_vals = np.array(X_train).flatten() if len(X_train) else np.array([])
-
-    def far_enough(val, tested, d=min_distance):
-        return not len(tested) or np.all(np.abs(tested - val) >= d)
-
-    filtered = np.array([s for s in samples if far_enough(s[0], tested_vals)])
-    if len(filtered) < 10:
-        filtered = samples
-
-    mu, sigma = gp.predict(filtered, return_std=True)
-    beta = 1.5
-    lam  = 0.3
-    ucb  = mu + beta * sigma
-    if previous_best is not None:
-        distances = np.abs(filtered.flatten() - previous_best)
-        ucb -= lam * distances
-
-    return float(filtered[np.argmax(ucb)][0])
-
-# ======= Main loop: preference-based optimization su 'a' =======
-def run_pbo_on_a():
-    print("\n--- Preference-based optimization on parameter 'a' (0..1) ---")
-    X_train = []   # [[a], ...]
-    y_train = []   # preferenze binarie (1 vince, 0 perde)
-    previous_best = None
-
-    for it in range(NUM_ITERATIONS):
-        print(f"\nIteration {it+1}/{NUM_ITERATIONS}")
-
-        if it == 0:
-            a1 = 0.10
-            a2 = 0.90
-        else:
-            gp.fit(np.array(X_train), np.array(y_train))
-            a2 = select_next_candidate(gp, X_train, previous_best)
-            a1 = previous_best
-
-        # --- Valutazione interattiva del PRIMO candidato ---
-        print(f"\nTrial [1] a = {a1:.3f}")
-        stream_candidate(a1)
-
-        # --- Valutazione interattiva del SECONDO candidato ---
-        print(f"\nTrial [2] a = {a2:.3f}")
-        stream_candidate(a2)
-
-        # --- Scelta utente ---
-        while True:
-            ch = get_user_choice()
-            if ch == '1':
-                X_train.append([a1]); y_train.append(1)
-                X_train.append([a2]); y_train.append(0)
-                previous_best = a1
-                break
-            elif ch == '2':
-                X_train.append([a1]); y_train.append(0)
-                X_train.append([a2]); y_train.append(1)
-                previous_best = a2
-                break
-            elif ch == 'r':
-                print("Repeating the iteration...")
-                # ripeti streaming degli stessi due candidati
-                print(f"\nTrial [1] a = {a1:.3f}")
-                stream_candidate(a1)
-                print(f"\nTrial [2] a = {a2:.3f}")
-                stream_candidate( a2)
-            elif ch == 'q':
-                print("Stopped by user.")
-                return previous_best
-
-    print(f"\Best 'a' found: {previous_best:.3f}")
-    return previous_best
