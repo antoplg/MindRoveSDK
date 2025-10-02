@@ -99,14 +99,34 @@ def load_calibration_cocon(csv_path="cocontraction_session.csv", percent=10):
 COCON_MIN, COCON_MAX = load_calibration_cocon("cocontraction_session.csv", percent=trim_percent)
 
 # ───── Build pyqtgraph window ──────────────────────────────
-# pg.setConfigOption('background', 'w')
-# pg.setConfigOption('foreground', 'k')
-win   = pg.GraphicsLayoutWidget(title="Live Cocontraction", show=True)
-# p     = win.addPlot(row=0, col=0, title="Cocontraction (normalized)")
-# curve = p.plot(pen=pg.mkPen(color=(0, 150, 0), width=2))
-# p.showGrid(x=True, y=True, alpha=0.3)
 
-# Second plot: mapping function
+pg.setConfigOption('background', 'w')
+pg.setConfigOption('foreground', 'k')
+
+# finestra principale
+win = pg.GraphicsLayoutWidget(title="Live Cocontraction", show=True)
+
+# # --- primo plot: cocontrazione e flex/ext ---
+# q = win.addPlot(row=0, col=0, title="Cocontraction (normalized)")
+# curve = q.plot(pen=pg.mkPen(color=(0, 150, 0), width=2))
+# q.showGrid(x=True, y=True, alpha=0.3)
+# q.setYRange(0, 2.5)   # <── blocca range Y
+
+# emg_plots   = []
+# emg_curves  = []
+# directions  = ["Flexion", "Extension"]
+
+# for i in range(2):
+#     p = win.addPlot(row=i+1, col=0, title=f"{directions[i]}")
+#     dark_color = (30, 30, 180) if i == 0 else (180, 30, 30)
+#     c = p.plot(pen=pg.mkPen(color=dark_color, width=2))
+#     p.showGrid(x=True, y=True, alpha=0.3)
+#     p.setYRange(0, 2.5)   # <── stesso range
+
+#     emg_plots.append(p)
+#     emg_curves.append(c)
+
+# --- secondo plot: EMG flexion/extension ---
 p_map   = win.addPlot(row=1, col=0, title="Mapping cocontraction → velocity")
 curve_map = p_map.plot(pen=pg.mkPen(color=(200, 0, 0), width=2))
 p_map.showGrid(x=True, y=True, alpha=0.3)
@@ -276,10 +296,18 @@ def update(a_value):
             print("Errore seriale:", e)
 
 
-    # # Aggiorna buffer e plot
-    # cocon_buf[:-1]  = cocon_buf[1:]
-    # cocon_buf[-1]   = cocon_norm
+    # # UPDATE COCONTRACTION plot
+    # cocon_buf[:-1] = cocon_buf[1:]
+    # cocon_buf[-1]  = cocon_norm
     # curve.setData(cocon_buf)
+
+    # # UPDATE FLEX/EXT plot
+    # for buf, val in zip(emg_bufs, (ext_norm, flex_norm)):
+    #     buf[:-1] = buf[1:]
+    #     buf[-1]  = val
+
+    # for c, buf in zip(emg_curves, emg_bufs):
+    #     c.setData(buf)
 
     # # Print velocity occasionally
     # now = time.time()

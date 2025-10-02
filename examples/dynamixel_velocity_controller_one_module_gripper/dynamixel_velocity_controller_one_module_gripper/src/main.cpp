@@ -239,7 +239,7 @@ void loop() {
     if (DEBUG_SERIAL.available() > 0) {
       header = DEBUG_SERIAL.peek();  // peek non consuma il byte
     }
-    else if (DEBUG_SERIAL.available() <= 0 && (header != 'G' || header != 'S')) {
+  else if (DEBUG_SERIAL.available() <= 0 && !(header == 'G' || header == 'S')) {
       header = '0';
     }
 
@@ -435,7 +435,7 @@ void loop() {
       }
 
       // ---------- SRL ----------      
-      if (cocon1 > 0.1) {
+      if (cocon1 > 0.2) {
           // SRL attivo → calcola velocità
           float vel_cmd = direction * cocon1 * max_motor_speed;
 
@@ -460,7 +460,7 @@ void loop() {
       }
 
       // ---------- GRIPPER ----------     
-      if (cocon1 < 0.1 && abs(flexext) > 0.2) {
+      if (cocon1 < 0.2 && abs(flexext) > 0.2) {
           // Gripper attivo → calcola velocità
           gripperVel = flexext * max_motor_speed;
       }

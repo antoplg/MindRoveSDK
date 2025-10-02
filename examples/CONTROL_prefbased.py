@@ -1,26 +1,27 @@
-import sys
 import os
 import csv
-import datetime
-import serial
+import sys
 import glob
+import serial
 import argparse
 import numpy as np
 import pyqtgraph as pg
-from SerialCom import SerialCommunication
 from pathlib import Path
-from scipy.signal import butter, iirnotch, filtfilt, lfilter, lfilter_zi
-from pyqtgraph.Qt import QtCore, QtWidgets
-from mindrove.board_shim import BoardShim, MindRoveInputParams, BoardIds
-from NMF import compute_synergy_metrics, Perform_NMF, trim_percent
-from PREF_BASED_OPT_cocontraction import velocity_from_cocon, TX_HEADER
 from serial.tools import list_ports
+from pyqtgraph.Qt import QtCore, QtWidgets
+from NMF import compute_synergy_metrics, Perform_NMF, trim_percent
+from scipy.signal import butter, iirnotch, filtfilt, lfilter_zi
+from mindrove.board_shim import BoardShim, MindRoveInputParams, BoardIds
 
 baud_rate   = 115200
-INVERSION   = True
+INVERSION   = False
 SERIAL_COM  = True
 FUZZY       = False
-FLEXEXT     = False  # disabilita flex/ext, solo cocontrazione
+FLEXEXT     = True  # disabilita flex/ext, solo cocontrazione
+
+TX_HEADER       = b'C'     # header per inviare velocità (float32)
+MAXA            = 3.0
+MINA            = -0.9
 
 if SERIAL_COM:
     port_list = list(list_ports.comports(include_links=False))
@@ -54,6 +55,8 @@ zi_hp            = lfilter_zi(b_hp, a_hp)
 
 # Buffer circolare per cocontrazione
 cocon_buf = np.zeros(N2)
+emg_bufs = [np.zeros(N2) for _ in range(2)] 
+
 
 # ──── Costanti fuzzy ──────────────────────────
 DIFF_DEADBAND        = 0.10
@@ -66,7 +69,6 @@ DIFF_SRL_WIDTH       = 0.15
 G_SMALL              = 0.15
 G_MED                = 0.50
 G_LARGE              = 0.75
-
 
 # ────── fuzzy helpers ──────────────────────────
 
@@ -158,13 +160,51 @@ def fuzzy_mapping(flex, ext, cocontraction, best_grip, best_srl):
     # ---- output ----
     return g_cmd, srl_cmd
 
+# ───── Mappa velocità ──────────────────────────────
+
+def velocity_from_cocon(cocon: float, a: float) -> float:
+    """
+    f(x) = (exp((a*3.9 - 0.9)*x) - 1) / (3.9*a - 0.9)
+    - Coccon atteso ~ [0,1] (non clampiamo >1: passa così com'è)
+    - 'a' in [0,1]
+    Gestione caso denominatore ~ 0 (a ≈ 0.23077): uso limite ~ x
+    """
+    k = (MAXA-MINA)*a + MINA # k = 3.9*a - 0.9
+    x = float(cocon)
+    if abs(k) < 1e-6:
+        val = x
+    else:
+        val = (np.exp(k*x) - 1.0) / k
+    return min(max(val, 0.0), 1.0)   # clamp tra 0 e 1
+
 # ───── Build pyqtgraph window ──────────────────────────────
 pg.setConfigOption('background', 'w')
 pg.setConfigOption('foreground', 'k')
-win   = pg.GraphicsLayoutWidget(title="Live Cocontraction", show=True)
-p     = win.addPlot(row=0, col=0, title="Cocontraction (normalized)")
-curve = p.plot(pen=pg.mkPen(color=(0, 150, 0), width=2))
-p.showGrid(x=True, y=True, alpha=0.3)
+
+# finestra principale
+win = pg.GraphicsLayoutWidget(title="Live Cocontraction", show=True)
+
+# --- primo plot: cocontrazione ---
+q = win.addPlot(row=0, col=0, title="Cocontraction (normalized)")
+curve = q.plot(pen=pg.mkPen(color=(0, 150, 0), width=2))
+q.showGrid(x=True, y=True, alpha=0.3)
+q.setYRange(0, 2.5)   # <── blocca range Y
+
+# --- secondo e terzo plot: EMG flexion/extension ---
+emg_plots   = []
+emg_curves  = []
+directions  = ["Flexion", "Extension"]
+
+for i in range(2):
+    p = win.addPlot(row=i+1, col=0, title=f"{directions[i]}")
+    dark_color = (30, 30, 180) if i == 0 else (180, 30, 30)
+    c = p.plot(pen=pg.mkPen(color=dark_color, width=2))
+    p.showGrid(x=True, y=True, alpha=0.3)
+    p.setYRange(0, 2.5)   # <── stesso range
+
+    emg_plots.append(p)
+    emg_curves.append(c)
+
 
 # ───── Carica dati calibrazione cocontrazione ──────────────
 def compute_trimmed_minmax(data, percent=10):
@@ -323,7 +363,7 @@ rms_kernel    = np.ones(rms_win_samps) / rms_win_samps
 cocon_smooth = 0.0
 
 def update():
-    global cocon_buf, cocon_smooth
+    global cocon_buf, cocon_smooth, curve, q, emg_curves, emg_plots
 
     count = board.get_board_data_count()
     if count <= 0:
@@ -351,8 +391,12 @@ def update():
 
     # Attivazioni NMF
     h_new = x_new.dot(W_pinv)
-    flex_norm = max(0.0, (h_new[1] - k_flex_min) / (k_flex_max - k_flex_min))
-    ext_norm  = max(0.0, (h_new[0] - k_ext_min)  / (k_ext_max  - k_ext_min))
+    if INVERSION:
+        flex_norm = max(0.0, (h_new[0] - k_flex_min) / (k_flex_max - k_flex_min))
+        ext_norm  = max(0.0, (h_new[1] - k_ext_min)  / (k_ext_max  - k_ext_min))
+    else:
+        flex_norm = max(0.0, (h_new[1] - k_flex_min) / (k_flex_max - k_flex_min))
+        ext_norm  = max(0.0, (h_new[0] - k_ext_min)  / (k_ext_max  - k_ext_min))
 
     # Cocontrazione grezza
     cocon_raw = min(flex_norm, ext_norm)
@@ -364,7 +408,6 @@ def update():
     # Normalizzazione con valori da calibrazione
     if COCON_MAX > COCON_MIN:
         cocon_norm = (cocon_smooth - COCON_MIN) / (COCON_MAX - COCON_MIN)
-        # cocon_norm = np.clip(cocon_norm, 0.0, 1.0)
         cocon_norm = max(cocon_norm, 0.0)
     else:
         cocon_norm = 0.0
@@ -391,11 +434,26 @@ def update():
         except Exception as e:
             print("Errore seriale:", e)
 
-    # Aggiorna buffer e plot
+    # UPDATE COCONTRACTION plot
     cocon_buf[:-1] = cocon_buf[1:]
     cocon_buf[-1]  = cocon_norm
     curve.setData(cocon_buf)
-    p.enableAutoRange(axis='y', enable=True)
+
+    # UPDATE FLEX/EXT plot
+    for buf, val in zip(emg_bufs, (ext_norm, flex_norm)):
+        buf[:-1] = buf[1:]
+        buf[-1]  = val
+
+    for c, buf in zip(emg_curves, emg_bufs):
+        c.setData(buf)
+
+    if SERIAL_COM and ser.in_waiting > 0:
+        try:
+            data = ser.readline().decode("utf-8", errors="ignore").strip()
+            if data:
+                print("RX:", data)
+        except Exception as e:
+            print("Errore lettura seriale:", e)
 
 # timer
 timer = QtCore.QTimer()

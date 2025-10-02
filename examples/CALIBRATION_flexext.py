@@ -80,6 +80,9 @@ def update():
     
     data_raw = board.get_board_data(N)  # (n_ch, N)
 
+    if data_raw.shape[1] < 20:
+        return
+
     # FILTRA EMG
     data_emg = np.zeros_like(data_raw)
     for ch in emg_ch:

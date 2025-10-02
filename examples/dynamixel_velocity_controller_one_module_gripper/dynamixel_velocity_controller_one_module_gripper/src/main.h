@@ -24,8 +24,8 @@ bool print = false;
 //Initialize module class
 int max_motor_speed = 200, min_motor_speed = -200; // [0.024 rad/s] or [0.229 rotation/minute] // [raw]
 
-float min_position = 15*PI/180; // appx 0.26, before it was 5
-float max_position = 60*PI/180; // appx 1.4 [rad], before it was 80
+float min_position = 175.68*PI/180; // appx 0.26, before it was 15
+float max_position = 263.67*PI/180; // appx 1.4 [rad], before it was 60
 
 // Initialize
 float setpointAngle=min_position, setpointVelocity = 0; // for sinusoidal angle
@@ -83,8 +83,6 @@ DynamixelShield dxl; // Serial
 
 //This namespace is required to use Control table item names
 using namespace ControlTableItem;
-
-
 
 // ----- SYNC READ and WRITE  - (from example code)
 const uint8_t BROADCAST_ID = 254;

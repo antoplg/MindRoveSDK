@@ -59,8 +59,8 @@ def run_calibration(variable_name):
         print(f"\nIteration {iteration + 1} / {NUM_ITERATIONS}")
 
         if iteration == 0:
-            val1 = 0.1
-            val2 = 0.9
+            val1 = 0.2
+            val2 = 0.8
         else:
             gp.fit(np.array(X_train), np.array(y_train))
 
