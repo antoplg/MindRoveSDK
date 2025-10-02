@@ -13,11 +13,14 @@ from scipy.signal import butter, iirnotch, filtfilt, lfilter, lfilter_zi
 from pyqtgraph.Qt import QtCore, QtWidgets
 from mindrove.board_shim import BoardShim, MindRoveInputParams, BoardIds
 from NMF import compute_synergy_metrics, Perform_NMF, trim_percent
+from PREF_BASED_OPT_cocontraction import velocity_from_cocon, TX_HEADER
 from serial.tools import list_ports
 
+baud_rate   = 115200
 INVERSION   = True
 SERIAL_COM  = True
-baud_rate   = 115200
+FUZZY       = False
+FLEXEXT     = False  # disabilita flex/ext, solo cocontrazione
 
 if SERIAL_COM:
     port_list = list(list_ports.comports(include_links=False))
@@ -51,6 +54,109 @@ zi_hp            = lfilter_zi(b_hp, a_hp)
 
 # Buffer circolare per cocontrazione
 cocon_buf = np.zeros(N2)
+
+# ──── Costanti fuzzy ──────────────────────────
+DIFF_DEADBAND        = 0.10
+DIFF_DEADBAND_WIDTH  = 0.15
+CO_MIN               = 0.15
+CO_GATE_WIDTH        = 0.20
+DIFF_MAX_FOR_SRL     = 0.15
+DIFF_SRL_WIDTH       = 0.15
+
+G_SMALL              = 0.15
+G_MED                = 0.50
+G_LARGE              = 0.75
+
+
+# ────── fuzzy helpers ──────────────────────────
+
+def tri(x, a, b, c):
+    if x <= a or x >= c:
+        return 0.0
+    if x == b:
+        return 1.0
+    return (x - a) / (b - a) if x < b else (c - x) / (c - b)
+
+def grade(x, a, b):
+    if x <= a:
+        return 0.0
+    if x >= b:
+        return 1.0
+    return (x - a) / (b - a)
+
+def rgrade(x, a, b):
+    if x <= a:
+        return 1.0
+    if x >= b:
+        return 0.0
+    return (b - x) / (b - a)
+
+# ───── Fuzzy controller ─────────────────────────────────────
+
+def fuzzy_mapping(flex, ext, cocontraction, best_grip, best_srl):
+    d   = ext - flex             # -1..1
+    a   = abs(d)                 # |d|
+    c   = cocontraction          # 0..1
+    d01 = 0.5 * (d + 1.0)
+
+    # Membership su d
+    mu_neg  = tri(d01, 0.00, 0.00, 0.50)
+    mu_zero = tri(d01, 0.25, 0.50, 0.75)
+    mu_pos  = tri(d01, 0.50, 1.00, 1.00)
+
+    # Membership su |d|
+    mu_a_small = rgrade(a, DIFF_MAX_FOR_SRL, DIFF_MAX_FOR_SRL + DIFF_SRL_WIDTH)
+
+    # Membership su co-contraction
+    mu_c_low  = rgrade(c, CO_MIN, CO_MIN + CO_GATE_WIDTH)
+    mu_c_med  = tri(c, CO_MIN, CO_MIN + CO_GATE_WIDTH, CO_MIN + 2*CO_GATE_WIDTH)
+    mu_c_high = grade(c, CO_MIN + CO_GATE_WIDTH, CO_MIN + 2*CO_GATE_WIDTH)
+
+    # Consequents SRL
+    srl_slow = (best_srl - 0.2) 
+    srl_med  = best_srl 
+    srl_fast = (best_srl + 0.2) 
+
+    # Membership velocità gripper
+    mu_d_small = rgrade(a, G_SMALL, G_MED)
+    mu_d_med   = tri(a, G_SMALL, G_MED, G_LARGE)
+    mu_d_large = grade(a, G_MED, G_LARGE)
+
+    # Consequents gripper
+    g_slow = (best_grip - 0.2) 
+    g_med  = best_grip 
+    g_fast = (best_grip + 0.2) 
+
+    # Magnitudo pesata gripper
+    Wmag = mu_d_small + mu_d_med + mu_d_large or 1.0
+    g_mag = (mu_d_small*g_slow + mu_d_med*g_med + mu_d_large*g_fast) / Wmag
+
+    # Direzione
+    Wdir = mu_pos + mu_neg or 1.0
+    dir_sign = (mu_pos - mu_neg) / Wdir
+
+    # Comando gripper + deadband
+    gripper_cmd = dir_sign * g_mag
+    g_gate = grade(a, DIFF_DEADBAND, DIFF_DEADBAND + DIFF_DEADBAND_WIDTH)
+    g_cmd = gripper_cmd * g_gate
+
+    # SRL fuzzy aggregation
+    w_srl_slow = min(mu_a_small, mu_c_low)
+    w_srl_med  = min(mu_a_small, mu_c_med)
+    w_srl_fast = min(mu_a_small, mu_c_high)
+    Wsrl = w_srl_slow + w_srl_med + w_srl_fast or 1.0
+    srl_cmd_mag = (w_srl_slow*srl_slow + w_srl_med*srl_med + w_srl_fast*srl_fast) / Wsrl
+
+    # Gate SRL
+    co_gate       = grade(c, CO_MIN, CO_MIN + CO_GATE_WIDTH)
+    diff_gate_srl = rgrade(a, DIFF_MAX_FOR_SRL, DIFF_MAX_FOR_SRL + DIFF_SRL_WIDTH)
+    srl_gate      = min(co_gate, diff_gate_srl)
+
+    g_cmd = np.clip(g_cmd, -1, 1)
+    srl_cmd = np.clip(srl_cmd_mag * srl_gate, 0, 1)
+
+    # ---- output ----
+    return g_cmd, srl_cmd
 
 # ───── Build pyqtgraph window ──────────────────────────────
 pg.setConfigOption('background', 'w')
@@ -88,23 +194,70 @@ def load_calibration_cocon(csv_path="cocontraction_session.csv", percent=10):
 
 COCON_MIN, COCON_MAX = load_calibration_cocon("cocontraction_session.csv", percent=trim_percent)
 
-# ───── mapping velocity ────────────────────────────────
-
-def velocity_from_cocon(cocon: float, a: float) -> float:
-    """
-    f(x) = (exp((a*3.9 - 0.9)*x) - 1) / (3.9*a - 0.9)
-    - Coccon atteso ~ [0,1] (non clampiamo >1: passa così com'è)
-    - 'a' in [0,1]
-    Gestione caso denominatore ~ 0 (a ≈ 0.23077): uso limite ~ x
-    """
-    k = 3.9*a - 0.9
-    x = float(cocon)
-    if abs(k) < 1e-6:
-        # limite di (e^{k x}-1)/k per k->0 è x
-        return x
-    return (np.exp(k*x) - 1.0) / k
-
 # ───── Compute NMF offline ─────────────────────────────────
+def load_calibration_values(csv_path="calibration_results.csv"):
+    """
+    Supports both formats:
+    A) rows of (variable,value)
+       variable,value
+       gripper_velocity,0.42
+       srl_velocity,0.77
+
+    B) single row
+       gripper_velocity,srl_velocity
+       0.42,0.77
+    """
+    p = Path(csv_path)
+    if not p.exists():
+        print(f"[WARN] Calibration file not found: {csv_path}. Using defaults 0.0, 0.0")
+        return 0.0, 0.0
+
+    with p.open("r", newline="") as f:
+        reader = csv.reader(f)
+        rows = [r for r in reader if r]
+
+    # Empty or header only
+    if len(rows) < 2:
+        print(f"[WARN] Calibration file seems empty: {csv_path}. Using defaults 0.0, 0.0")
+        return 0.0, 0.0
+
+    # Detect format
+    header = [h.strip().lower() for h in rows[0]]
+
+    # Format B: single row with two columns
+    if ("gripper_velocity" in header) and ("srl_velocity" in header) and len(rows) >= 2:
+        try:
+            idx_g   = header.index("gripper_velocity")
+            idx_s   = header.index("srl_velocity")
+            vals    = rows[1]
+            best_g  = float(vals[idx_g])
+            best_s  = float(vals[idx_s])
+            return best_g, best_s
+        except Exception as e:
+            print(f"[WARN] Failed to parse single-row calibration CSV: {e}. Using defaults.")
+            return 0.0, 0.0
+
+    # Format A: variable,value pairs
+    try:
+        best_g, best_s = 0.0, 0.0
+        for r in rows[1:]:
+            if len(r) < 2:
+                continue
+            var = r[0].strip().lower()
+            try:
+                val = float(r[1])
+            except:
+                continue
+            if var in ("gripper_velocity", "gripper", "best_gripper"):
+                best_g = val
+            elif var in ("srl_velocity", "srl", "best_srl"):
+                best_s = val
+        return best_g, best_s
+    except Exception as e:
+        print(f"[WARN] Failed to parse calibration CSV: {e}. Using defaults.")
+        return 0.0, 0.0    
+    
+BEST_GRIPPER, BEST_SRL = load_calibration_values("calibration_results.csv")
 
 def load_data(path):
     ext = os.path.splitext(path)[1].lower()
@@ -216,13 +369,24 @@ def update():
     else:
         cocon_norm = 0.0
 
-    vel = velocity_from_cocon(cocon_norm, a_value)
+    cocon1 = velocity_from_cocon(cocon_norm, a_value)
+    cocon2 = 0.0    # riservato per futuro uso 
+
+    if not FLEXEXT:
+        flex_norm = 0.0
+        ext_norm  = 0.0
+
+    # ───── Fuzzy control ──────────────────────────
+    if FUZZY:
+        flexext_cmd, cocon1_mag = fuzzy_mapping(flex_norm, ext_norm, cocon_norm, BEST_GRIPPER, BEST_SRL)
+        command = f"{flexext_cmd:.6f} {cocon1_mag:.6f} {cocon2:.6f}\n"
+    else:
+        command = f"{flex_norm-ext_norm:.6f} {cocon1:.6f} {cocon2:.6f}\n"
+
     # Serial transmission
     if SERIAL_COM:
         try:
-            target = 'C'
-            command = f"{vel:.6f}\n"
-            ser.write(target.encode())
+            ser.write(TX_HEADER)
             ser.write(command.encode())
         except Exception as e:
             print("Errore seriale:", e)

@@ -18,14 +18,13 @@ int gripperVel    = 0;
 int presentLoad   = 0;
 
 // --- DEFINE SERIAL VARIABLES ---
-double velocity1              = 0.0; 
-double flex                   = 0.0;
-double ext                    = 0.0;
-double best_grip              = 0.0;
-double best_srl               = 0.0;
+bool fuzzy_control_enabled    = true;
+bool inverted                 = false;
+double flexext                = 0.0;
+double cocon1                 = 0.0;
+double cocon2                 = 0.0;
 String inputString            = "";         // a String to hold incoming data
 float received_val            = 0.0;
-bool inverted                 = false;
 int direction                 = +1;
 bool stringComplete           = false;      // whether the string is complete
 
@@ -240,7 +239,7 @@ void loop() {
     if (DEBUG_SERIAL.available() > 0) {
       header = DEBUG_SERIAL.peek();  // peek non consuma il byte
     }
-    else if (DEBUG_SERIAL.available() <= 0 && header == 'C') {
+    else if (DEBUG_SERIAL.available() <= 0 && (header != 'G' || header != 'S')) {
       header = '0';
     }
 
@@ -325,14 +324,13 @@ void loop() {
       }
     }
     
-    else if (header == 'F') {
-      if (DEBUG_SERIAL.available() >= 5) {
+    else if (header == 'C') {
+      if (DEBUG_SERIAL.available() >= 4) {
         DEBUG_SERIAL.read();  // consuma il 'C'
         inputString     = DEBUG_SERIAL.readStringUntil('\n');
-        best_grip       = getValue(inputString, ' ', 0).toFloat();
-        best_srl        = getValue(inputString, ' ', 1).toFloat();
-        flex            = getValue(inputString, ' ', 2).toFloat();
-        ext             = getValue(inputString, ' ', 3).toFloat();
+        flexext         = getValue(inputString, ' ', 0).toFloat();
+        cocon1          = getValue(inputString, ' ', 1).toFloat();
+        cocon2          = getValue(inputString, ' ', 2).toFloat();
         inputString     = "";
         
         DEBUG_SERIAL.print("  gripvel1: ");
@@ -341,126 +339,137 @@ void loop() {
         DEBUG_SERIAL.println(joint_velocities(1));
       }
       
-      // ---------- FUZZY (come prima per d, a, c, d01 e membership) ----------
-      float d   = ext - flex;               // -1..1
-      float a   = fabsf(d);                 // |d|
-      float c   = min(flex, ext);           // co-contrazione 0..1
-      float d01 = 0.5f * (d + 1.0f);
+      if (fuzzy_control_enabled == true) {
+      //   // --- FUZZY CONTROLLER ---
+      //   // ---------- FUZZY (come prima per d, a, c, d01 e membership) ----------
+      //   float d   = ext - flex;               // -1..1
+      //   float a   = fabsf(d);                 // |d|
+      //   float c   = cocontraction;          // co-contrazione 0..1
+      //   float d01 = 0.5f * (d + 1.0f);
 
-      // Membership su d (per la direzione del gripper)
-      float mu_neg    = tri(d01, 0.00f, 0.00f, 0.50f);  // flex > ext → chiudi
-      float mu_zero   = tri(d01, 0.25f, 0.50f, 0.75f);  // vicino a 0 → hold
-      float mu_pos    = tri(d01, 0.50f, 1.00f, 1.00f);  // ext > flex → apri
+      //   // Membership su d (per la direzione del gripper)
+      //   float mu_neg    = tri(d01, 0.00f, 0.00f, 0.50f);  // flex > ext → chiudi
+      //   float mu_zero   = tri(d01, 0.25f, 0.50f, 0.75f);  // vicino a 0 → hold
+      //   float mu_pos    = tri(d01, 0.50f, 1.00f, 1.00f);  // ext > flex → apri
 
-      // Membership su |d| (per “piccola differenza” SRL)
-      float mu_a_small  = rgrade(a, DIFF_MAX_FOR_SRL, DIFF_MAX_FOR_SRL + DIFF_SRL_WIDTH); // 1 se |d| piccolo
+      //   // Membership su |d| (per “piccola differenza” SRL)
+      //   float mu_a_small  = rgrade(a, DIFF_MAX_FOR_SRL, DIFF_MAX_FOR_SRL + DIFF_SRL_WIDTH); // 1 se |d| piccolo
 
-      // Membership su co-contrazione
-      float mu_c_low    = rgrade(c, CO_MIN,                     CO_MIN + CO_GATE_WIDTH);
-      float mu_c_med    = tri   (c, CO_MIN,                     CO_MIN + CO_GATE_WIDTH, CO_MIN + 2*CO_GATE_WIDTH);
-      float mu_c_high   = grade (c, CO_MIN + CO_GATE_WIDTH,     CO_MIN + 2*CO_GATE_WIDTH);
-      
-      // Consequents SRL (scala con la co-contrazione)
-      float srl_slow  = (best_srl - 0.2) * max_motor_speed;
-      float srl_med   = best_srl * max_motor_speed;
-      float srl_fast  = (best_srl + 0.2) * max_motor_speed;
-
-      // ========= GRIPPER con 3 livelli per direzione =========
-      // Membership su |d| per lo SPEED del gripper
-      float mu_d_small  = rgrade(a, G_SMALL, G_MED);
-      float mu_d_med    = tri   (a, G_SMALL, G_MED, G_LARGE);
-      float mu_d_large  = grade (a, G_MED,   G_LARGE);
-
-      // Consequents velocità gripper (magnitudo)
-      float g_slow  = (best_grip - 0.2) * max_motor_speed;
-      float g_med   = best_grip * max_motor_speed;
-      float g_fast  = (best_grip + 0.2) * max_motor_speed;
-
-      // Magnitudo pesata (0..max) in base a |d|
-      float Wmag      = mu_d_small + mu_d_med + mu_d_large; if (Wmag < 1e-6f) Wmag = 1.f;
-      float g_mag     = (mu_d_small*g_slow + mu_d_med*g_med + mu_d_large*g_fast) / Wmag;
-
-      // Direzione dal segno (mu_pos vs mu_neg), -1..+1
-      float Wdir      = mu_pos + mu_neg; if (Wdir < 1e-6f) Wdir = 1.f;
-      float dir_sign  = (mu_pos - mu_neg) / Wdir;  // negativo=chiudi, positivo=apri
-
-      // Comando gripper “grezzo”
-      float gripper_cmd = dir_sign * g_mag;
-
-      // Deadband morbida sul gripper (se |d| piccolo → ≈0)
-      float g_gate = grade(a, DIFF_DEADBAND, DIFF_DEADBAND + DIFF_DEADBAND_WIDTH);
-      float g_cmd  = gripper_cmd * g_gate;   // applica la deadband
-
-      // ========= SRL: pesi fuzzy dipendenti da co-contrazione =========
-      // SRL attivo solo quando |d| è piccolo → includiamo mu_a_small nei pesi
-      float w_srl_slow  = min(mu_a_small, mu_c_low);
-      float w_srl_med   = min(mu_a_small, mu_c_med);
-      float w_srl_fast  = min(mu_a_small, mu_c_high);
-      float Wsrl        = w_srl_slow + w_srl_med + w_srl_fast; if (Wsrl < 1e-6f) Wsrl = 1.f;
-      float srl_cmd_mag = (w_srl_slow*srl_slow + w_srl_med*srl_med + w_srl_fast*srl_fast) / Wsrl;
-
-      // Gate esplicito SRL: (entrambi sopra soglia) AND (differenza piccola)
-      float co_gate       = grade(c, CO_MIN, CO_MIN + CO_GATE_WIDTH);
-      float diff_gate_srl = rgrade(a, DIFF_MAX_FOR_SRL, DIFF_MAX_FOR_SRL + DIFF_SRL_WIDTH);
-      float srl_gate      = min(co_gate, diff_gate_srl);
-
-      // ---------- Mutua esclusione + applicazione ----------
-      if (srl_gate > 0.5f) {
-        // SRL “wins”: gripper fermo
-        gripperVel  = 0;
-        float cmd   = srl_cmd_mag * srl_gate;
-
-        if (cmd > 1.0f) {
-          lastActiveTime   = millis();
-          inverted         = false;
-          ee_velocities(0) = direction * cmd;
-        } 
+      //   // Membership su co-contrazione
+      //   float mu_c_low    = rgrade(c, CO_MIN,                     CO_MIN + CO_GATE_WIDTH);
+      //   float mu_c_med    = tri   (c, CO_MIN,                     CO_MIN + CO_GATE_WIDTH, CO_MIN + 2*CO_GATE_WIDTH);
+      //   float mu_c_high   = grade (c, CO_MIN + CO_GATE_WIDTH,     CO_MIN + 2*CO_GATE_WIDTH);
         
-      } else {
-        // SRL non attivo → usa inversione dopo 2s
-        if (!inverted && millis() - lastActiveTime >= 2000UL) {
-          inverted  = true;
-          direction = -direction;
-        }
-        ee_velocities(0) = 0.0f;
-        ee_velocities(1) = 0.0f;
-        ee_velocities(2) = 0.0f;
-        gripperVel       = (int)g_cmd;
-      }
-    }
-    
-    else if (header == 'C') {
-      if (DEBUG_SERIAL.available() >= 1) {
-        DEBUG_SERIAL.read();  // consuma il 'C'
-        inputString     = DEBUG_SERIAL.readStringUntil('\n');
-        velocity1       = getValue(inputString, ' ', 0).toFloat();
-        inputString     = "";
-        
-        DEBUG_SERIAL.print("  velocity1: ");
-        DEBUG_SERIAL.print(velocity1);
+      //   // Consequents SRL (scala con la co-contrazione)
+      //   float srl_slow  = (best_srl - 0.2) * max_motor_speed;
+      //   float srl_med   = best_srl * max_motor_speed;
+      //   float srl_fast  = (best_srl + 0.2) * max_motor_speed;
+
+      //   // ========= GRIPPER con 3 livelli per direzione =========
+      //   // Membership su |d| per lo SPEED del gripper
+      //   float mu_d_small  = rgrade(a, G_SMALL, G_MED);
+      //   float mu_d_med    = tri   (a, G_SMALL, G_MED, G_LARGE);
+      //   float mu_d_large  = grade (a, G_MED,   G_LARGE);
+
+      //   // Consequents velocità gripper (magnitudo)
+      //   float g_slow  = (best_grip - 0.2) * max_motor_speed;
+      //   float g_med   = best_grip * max_motor_speed;
+      //   float g_fast  = (best_grip + 0.2) * max_motor_speed;
+
+      //   // Magnitudo pesata (0..max) in base a |d|
+      //   float Wmag      = mu_d_small + mu_d_med + mu_d_large; if (Wmag < 1e-6f) Wmag = 1.f;
+      //   float g_mag     = (mu_d_small*g_slow + mu_d_med*g_med + mu_d_large*g_fast) / Wmag;
+
+      //   // Direzione dal segno (mu_pos vs mu_neg), -1..+1
+      //   float Wdir      = mu_pos + mu_neg; if (Wdir < 1e-6f) Wdir = 1.f;
+      //   float dir_sign  = (mu_pos - mu_neg) / Wdir;  // negativo=chiudi, positivo=apri
+
+      //   // Comando gripper “grezzo”
+      //   float gripper_cmd = dir_sign * g_mag;
+
+      //   // Deadband morbida sul gripper (se |d| piccolo → ≈0)
+      //   float g_gate = grade(a, DIFF_DEADBAND, DIFF_DEADBAND + DIFF_DEADBAND_WIDTH);
+      //   float g_cmd  = gripper_cmd * g_gate;   // applica la deadband
+
+      //   // ========= SRL: pesi fuzzy dipendenti da co-contrazione =========
+      //   // SRL attivo solo quando |d| è piccolo → includiamo mu_a_small nei pesi
+      //   float w_srl_slow  = min(mu_a_small, mu_c_low);
+      //   float w_srl_med   = min(mu_a_small, mu_c_med);
+      //   float w_srl_fast  = min(mu_a_small, mu_c_high);
+      //   float Wsrl        = w_srl_slow + w_srl_med + w_srl_fast; if (Wsrl < 1e-6f) Wsrl = 1.f;
+      //   float srl_cmd_mag = (w_srl_slow*srl_slow + w_srl_med*srl_med + w_srl_fast*srl_fast) / Wsrl;
+
+      //   // Gate esplicito SRL: (entrambi sopra soglia) AND (differenza piccola)
+      //   float co_gate       = grade(c, CO_MIN, CO_MIN + CO_GATE_WIDTH);
+      //   float diff_gate_srl = rgrade(a, DIFF_MAX_FOR_SRL, DIFF_MAX_FOR_SRL + DIFF_SRL_WIDTH);
+      //   float srl_gate      = min(co_gate, diff_gate_srl);
+
+      //   // ---------- Mutua esclusione + applicazione ----------
+      //   if (srl_gate > 0.5f) {
+      //     // SRL “wins”: gripper fermo
+      //     gripperVel  = 0;
+      //     float cmd   = srl_cmd_mag * srl_gate;
+
+      //     if (cmd > 1.0f) {
+      //       ee_velocities(0) = direction * cmd;
+
+      //       // ---- controllo limiti posizione ----
+      //       for (int i = 0; i < 3; i++) {
+      //         if ((module1.moduleLegAngle[i] >= max_position) && (ee_velocities(0) > 0)) {
+      //           direction      = -1;      // inverti direzione
+      //           ee_velocities(0) = 0.0f;  // blocca al limite
+      //         }
+      //         else if ((module1.moduleLegAngle[i] <= min_position) && (ee_velocities(0) < 0)) {
+      //           direction      = 1;
+      //           ee_velocities(0) = 0.0f;
+      //         }
+      //       }
+      //     }
+      //   } else {
+      //     // SRL non attivo → nessun movimento
+      //     ee_velocities(0) = 0.0f;
+      //     ee_velocities(1) = 0.0f;
+      //     ee_velocities(2) = 0.0f;
+      //     gripperVel       = (int)g_cmd;
+      //   }
       }
 
-      // ---------- Mutua esclusione + applicazione ----------
-      
-      if (velocity1 > 0.1) {
-          lastActiveTime   = millis();
-          inverted         = false;
-          ee_velocities(0) = direction * velocity1 * max_motor_speed;
-      } 
-        
+      // ---------- SRL ----------      
+      if (cocon1 > 0.1) {
+          // SRL attivo → calcola velocità
+          float vel_cmd = direction * cocon1 * max_motor_speed;
+
+          // Controlla se sta andando oltre i limiti
+          for (int i = 0; i < 3; i++) {
+              if ((module1.moduleLegAngle[i] >= max_position) && (vel_cmd > 0)) {
+                  direction = -1;   // inverti direzione
+                  vel_cmd   = 0.0f; // ferma il movimento sul limite
+              }
+              else if ((module1.moduleLegAngle[i] <= min_position) && (vel_cmd < 0)) {
+                  direction = 1;    // inverti direzione
+                  vel_cmd   = 0.0f;
+              }
+          }
+          ee_velocities(0) = direction * cocon1 * max_motor_speed;
+      }
       else {
-        // SRL non attivo → usa inversione dopo 2s
-        if (!inverted && millis() - lastActiveTime >= 2000UL) {
-          inverted  = true;
-          direction = -direction;
-        }
-        ee_velocities(0) = 0.0f;
-        ee_velocities(1) = 0.0f;
-        ee_velocities(2) = 0.0f;
+          // SRL non attivo → nessun movimento
+          ee_velocities(0) = 0.0f;
+          ee_velocities(1) = 0.0f;
+          ee_velocities(2) = 0.0f;
+      }
+
+      // ---------- GRIPPER ----------     
+      if (cocon1 < 0.1 && abs(flexext) > 0.2) {
+          // Gripper attivo → calcola velocità
+          gripperVel = flexext * max_motor_speed;
+      }
+      else {
+          // Gripper non attivo → nessun movimento
+          gripperVel = 0;
       }
     }
 
-    
     // Set fixed position for module (only for now, later controlled by EMG)
     // module1.setpointLegAngle[0] = 0.1; // [rad]
     // module1.setpointLegAngle[1] = 0.1;
@@ -471,7 +480,6 @@ void loop() {
     // compute jacobian
     float motor_angles[3] = {module1.moduleLegAngle[0], module1.moduleLegAngle[1], module1.moduleLegAngle[2]};
     numericalJacobian(forwardKinematicsOneModule, motor_angles, jacobian_matrix);
-    //numericalJacobian(forwardKinematicsTwoModules, motor_angles, jacobian_matrix);
 
     // Compute the joint velocities with jacobian
     joint_velocities = Inverse(jacobian_matrix) * ee_velocities;
@@ -491,7 +499,7 @@ void loop() {
     }
 
     // MIN-MAX Velocity Check
-    //ARM
+    // SRL
     for(int i = 0; i < 3; i++) {
       if (module1.setpointLegAngleVelocity[i] > max_motor_speed) module1.setpointLegAngleVelocity[i]      = max_motor_speed; // [raw]
       else if (module1.setpointLegAngleVelocity[i] < min_motor_speed) module1.setpointLegAngleVelocity[i] = min_motor_speed; // [raw]
@@ -506,7 +514,7 @@ void loop() {
         module1.setpointLegAngleVelocity[i] = 0;
     }
 
-    //GRIPPER
+    // GRIPPER
     if (gripperVel > max_motor_speed) gripperVel        = max_motor_speed; // [raw]
     else if (gripperVel < min_motor_speed) gripperVel   = min_motor_speed; // [raw]
 
@@ -566,14 +574,6 @@ void loop() {
       }
       else if(controlMode==4){
         DEBUG_SERIAL.print("PARSED -> grip: ");
-        DEBUG_SERIAL.print(best_grip);
-        DEBUG_SERIAL.print("  srl: ");
-        DEBUG_SERIAL.print(best_srl);
-        DEBUG_SERIAL.print("  flex: ");
-        DEBUG_SERIAL.print(flex);
-        DEBUG_SERIAL.print("  ext: ");
-        DEBUG_SERIAL.print(ext); 
-        DEBUG_SERIAL.print(" ");
         DEBUG_SERIAL.print(module1.moduleLegAnglularVelocity[0]);  
         DEBUG_SERIAL.print(" "); 
         DEBUG_SERIAL.print(module1.setpointLegAngleVelocity[0]);

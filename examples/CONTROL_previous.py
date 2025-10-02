@@ -273,7 +273,7 @@ def update():
                 command = f"{BEST_SRL:.6f} {BEST_GRIPPER:.6f} {ext_norm:.6f} {flex_norm:.6f}\n"
             else:
                 command = f"{BEST_SRL:.6f} {BEST_GRIPPER:.6f} {flex_norm:.6f} {ext_norm:.6f}\n"
-            target = 'C'
+            target = 'V'
 
             ser.write(target.encode())  # send header
             ser.write(command.encode())

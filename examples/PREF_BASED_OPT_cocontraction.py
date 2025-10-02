@@ -1,35 +1,36 @@
+import os
 import csv
 import sys
-import os
 import time
 import glob
 import serial
-import threading
 import argparse
-from pathlib import Path
+import threading
 import numpy as np
 import pyqtgraph as pg
+from pathlib import Path
 from scipy.stats import norm
 from serial.tools import list_ports
 from pyqtgraph.Qt import QtCore, QtWidgets
-from scipy.signal import butter, iirnotch, filtfilt, lfilter, lfilter_zi
-from mindrove.board_shim import BoardShim, MindRoveInputParams, BoardIds
 from sklearn.gaussian_process import GaussianProcessRegressor
-from sklearn.gaussian_process.kernels import RBF, ConstantKernel as C
 from NMF import compute_synergy_metrics, Perform_NMF, trim_percent
+from sklearn.gaussian_process.kernels import RBF, ConstantKernel as C
+from mindrove.board_shim import BoardShim, MindRoveInputParams, BoardIds
+from scipy.signal import butter, iirnotch, filtfilt, lfilter, lfilter_zi
 
 # ======= Parametri generali =======
 BAUD_RATE       = 115200
 SERIAL_TIMEOUT  = 0.01     # s, lettura non bloccante
-TX_HEADER       = b'V'     # header per inviare velocità (float32)
+TX_HEADER       = b'C'     # header per inviare velocità (float32)
 PRINT_EVERY     = 0.2      # s, quanto spesso stampare feedback a video
 
+MAXA            = 3.0
+MINA            = -0.9
 NUM_ITERATIONS  = 10
 RANGE_A         = (0.0, 1.0)
 MIN_DISTANCE    = 0.15     # distanza minima tra campioni di 'a'
 N_SAMPLES       = 1000     # candidati per la policy di acquisizione
 
-INVERSION   = True
 SERIAL_COM  = True
 baud_rate   = 115200
 
@@ -53,7 +54,7 @@ board.start_stream()
 # ───── Prepare channels & buffers ──────────────────────────
 emg_ch      = BoardShim.get_emg_channels(board_id)
 sr          = BoardShim.get_sampling_rate(board_id)
-window_s    = 10
+window_s    = 1
 N           = int(window_s * sr)
 window_s2   = 1
 N2          = int(window_s2 * sr)
@@ -126,12 +127,13 @@ def velocity_from_cocon(cocon: float, a: float) -> float:
     - 'a' in [0,1]
     Gestione caso denominatore ~ 0 (a ≈ 0.23077): uso limite ~ x
     """
-    k = 3.9*a - 0.9
+    k = (MAXA-MINA)*a + MINA # k = 3.9*a - 0.9
     x = float(cocon)
     if abs(k) < 1e-6:
-        # limite di (e^{k x}-1)/k per k->0 è x
-        return x
-    return (np.exp(k*x) - 1.0) / k
+        val = x
+    else:
+        val = (np.exp(k*x) - 1.0) / k
+    return min(max(val, 0.0), 1.0)   # clamp tra 0 e 1
 
 def plot_mapping_function(a_value):
     x_vals = np.linspace(0, 1, 200)   # cocontraction range
@@ -263,11 +265,13 @@ def update(a_value):
 
     vel = velocity_from_cocon(cocon_norm, a_value)
 
+    command = f"{0:.6f} {vel:.6f} {0:.6f}\n"
+
     # Serial transmission
     if SERIAL_COM:
         try:
-            ser.write(b"C")
-            ser.write(f"{vel:.6f}\n".encode())
+            ser.write(TX_HEADER)
+            ser.write(command.encode())
         except Exception as e:
             print("Errore seriale:", e)
 
